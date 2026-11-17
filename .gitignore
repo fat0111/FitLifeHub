@@ -1,0 +1,151 @@
+# =============================================================================
+# .gitignore - FitLife Hub Project (CSC12002 - Cơ sở dữ liệu nâng cao)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. LaTeX Auxiliary & Intermediate Files (Report_LaTeX/)
+# -----------------------------------------------------------------------------
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.glg
+*.glo
+*.gls
+*.idx
+*.ilg
+*.ind
+*.ist
+*.lof
+*.log
+*.lot
+*.nav
+*.nlo
+*.nls
+*.out
+*.run.xml
+*.snm
+*.synctex.gz
+*.synctex(busy)
+*.toc
+*.vrb
+*.xdv
+*.upa
+*.upb
+
+# Giữ lại các file tài liệu và ảnh nguồn trong LaTeX
+!Report_LaTeX/*.tex
+!Report_LaTeX/*.jpg
+!Report_LaTeX/*.png
+!Report_LaTeX/*.pdf
+!Report_LaTeX/images/**
+
+# -----------------------------------------------------------------------------
+# 2. Microsoft SQL Server & Database Dumps
+# -----------------------------------------------------------------------------
+*.mdf
+*.ldf
+*.ndf
+*.bak
+*.trn
+*.sqlsuo
+*.sqlproj.user
+*.queryresult
+
+# -----------------------------------------------------------------------------
+# 3. Python (Scripts phát sinh dữ liệu & App Demo)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Môi trường ảo Python
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# File biến môi trường chứa secret/cấu hình kết nối local
+.env
+.env.local
+.env.*.local
+
+# -----------------------------------------------------------------------------
+# 4. .NET / C# / Visual Studio (App Demo)
+# -----------------------------------------------------------------------------
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rms/
+[Aa]rm64/
+*.user
+*.suo
+*.userprefs
+.vs/
+*.sln.docstates
+*.DotSettings.user
+
+# -----------------------------------------------------------------------------
+# 5. Node.js & Web (nếu dùng Web App Demo)
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# -----------------------------------------------------------------------------
+# 6. IDEs & Code Editors
+# -----------------------------------------------------------------------------
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+
+# -----------------------------------------------------------------------------
+# 7. Hệ điều hành (Windows & macOS)
+# -----------------------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
