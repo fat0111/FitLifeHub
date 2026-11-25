@@ -12,7 +12,7 @@ GO
    TIẾN ĐỘ THEO LÁT:
      [a] Function + sp_TaoHoaDon / sp_ThemChiTietHoaDon / sp_ThanhToanHoaDon /
          sp_DoiDiemThuong ............................ XONG (file này)
-     [b] Trigger trg_CapNhatThanhToan_Va_Loyalty .... CHƯA
+     [b] Trigger trg_CapNhatThanhToan_Va_Loyalty .... XONG
      [c] Partition + Index 1-3 ....................... CHƯA
      [d] KB08: sp_BaoCaoDoanhThu, sp_TopGoiDichVuBanChay ... CHƯA
 
@@ -56,7 +56,134 @@ GO
 /* --- 2.2. TRIGGER trg_CapNhatThanhToan_Va_Loyalty (AFTER INSERT, UPDATE) ----
    Gom RBTV81, RBTV64, RBTV90, RBTV92-95 vào một Trigger duy nhất trên THANH_TOAN. */
 
--- [LÁT B - CHƯA VIẾT]
+/* Điều kiện kích hoạt: giao dịch có TrangThaiTT = N'Thành công' và tổng các
+   giao dịch thành công của hóa đơn >= HOA_DON.ThanhTien.
+
+   Thiết kế:
+   - Set-based: xử lý đúng khi một câu INSERT/UPDATE chạm nhiều dòng/nhiều hóa đơn.
+   - Idempotent: bước 1 chỉ chuyển các hóa đơn đang 'Chờ thanh toán'. Hóa đơn nào
+     thực sự được chuyển sang 'Đã thanh toán' mới đi tiếp vào @Done, nên chạy lại
+     Trigger (UPDATE thêm ghi chú, hai giao dịch chen nhau) không cộng điểm hai lần.
+     Unique index RBTV06 là chốt chặn cuối.
+   - Chi phí O(1) cho mỗi hóa đơn: chỉ cộng dồn lên dòng HOI_VIEN, không quét lại
+     hóa đơn 12 tháng (giải quyết Vấn đề 4).
+   - Cập nhật HOI_VIEN trước LICH_SU_HANG: khóa dòng hội viên giữ đến hết giao dịch
+     nên hai thanh toán cùng hội viên không đụng nhau khi ghi LICH_SU_HANG. */
+CREATE OR ALTER TRIGGER dbo.trg_CapNhatThanhToan_Va_Loyalty
+ON dbo.THANH_TOAN
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    -- Hóa đơn có giao dịch thành công trong lần ghi này
+    DECLARE @MaHDs TABLE (MaHD BIGINT PRIMARY KEY);
+
+    INSERT INTO @MaHDs (MaHD)
+    SELECT DISTINCT MaHD
+    FROM inserted
+    WHERE TrangThaiTT = N'Thành công';
+
+    IF NOT EXISTS (SELECT 1 FROM @MaHDs) RETURN;
+
+    -- (1) RBTV81: chốt hóa đơn đã trả đủ. Chỉ các hóa đơn thực sự vừa chuyển trạng thái
+    --     mới được ghi vào @Done.
+    DECLARE @Done TABLE (
+        MaHD      BIGINT         NOT NULL PRIMARY KEY,
+        MaHV      BIGINT         NULL,
+        ThanhTien DECIMAL(18, 2) NOT NULL,
+        Diem      INT            NOT NULL DEFAULT 0
+    );
+
+    UPDATE h
+    SET h.TrangThai = N'Đã thanh toán'
+    OUTPUT inserted.MaHD, inserted.MaHV, inserted.ThanhTien INTO @Done (MaHD, MaHV, ThanhTien)
+    FROM dbo.HOA_DON h
+    JOIN @MaHDs x ON x.MaHD = h.MaHD
+    WHERE h.TrangThai = N'Chờ thanh toán'
+      AND h.ThanhTien > 0
+      AND (SELECT SUM(t.SoTien)
+           FROM dbo.THANH_TOAN t
+           WHERE t.MaHD = h.MaHD AND t.TrangThaiTT = N'Thành công') >= h.ThanhTien;
+
+    IF NOT EXISTS (SELECT 1 FROM @Done) RETURN;
+
+    -- (2) RBTV64: kích hoạt gói đăng ký của hóa đơn, tính lại ngày theo ngày thanh toán
+    DECLARE @Hom DATE = CAST(SYSDATETIME() AS DATE);
+
+    UPDATE d
+    SET d.TrangThai   = N'Đang hiệu lực',
+        d.NgayBatDau  = @Hom,
+        d.NgayKetThuc = ISNULL(DATEADD(MONTH, g.ThoiHanThang, @Hom),
+                               DATEADD(DAY, DATEDIFF(DAY, d.NgayBatDau, d.NgayKetThuc), @Hom))
+    FROM dbo.DANG_KY_GOI d
+    JOIN @Done x ON x.MaHD = d.MaHD
+    JOIN dbo.GOI_DICH_VU g ON g.MaGoi = d.MaGoi
+    WHERE d.TrangThai = N'Tạm dừng';
+
+    -- Từ đây chỉ còn hóa đơn gắn hội viên
+    IF NOT EXISTS (SELECT 1 FROM @Done WHERE MaHV IS NOT NULL) RETURN;
+
+    -- (3) RBTV90: ghi LICH_SU_DIEM (hóa đơn dưới 100.000 đ được 0 điểm nên không ghi,
+    --     vì RBTV58 yêu cầu điểm cộng > 0)
+    UPDATE @Done
+    SET Diem = dbo.fn_TinhDiemLoyalty(ThanhTien)
+    WHERE MaHV IS NOT NULL;
+
+    INSERT INTO dbo.LICH_SU_DIEM (LoaiGiaoDich, SoDiem, GhiChu, MaHV, MaHD)
+    SELECT N'Cộng', Diem, CONCAT(N'Tích điểm hóa đơn #', MaHD), MaHV, MaHD
+    FROM @Done
+    WHERE MaHV IS NOT NULL AND Diem > 0;
+
+    -- (4) RBTV92 + RBTV93: cộng dồn DiemTichLuy và TongChiTieuNam trên HOI_VIEN.
+    --     Gộp theo hội viên để một câu UPDATE xử lý được nhiều hóa đơn cùng hội viên.
+    DECLARE @HV TABLE (MaHV BIGINT NOT NULL PRIMARY KEY, Diem INT NOT NULL, ChiTieu DECIMAL(18, 2) NOT NULL);
+
+    INSERT INTO @HV (MaHV, Diem, ChiTieu)
+    SELECT MaHV, SUM(Diem), SUM(ThanhTien)
+    FROM @Done
+    WHERE MaHV IS NOT NULL
+    GROUP BY MaHV;
+
+    UPDATE hv
+    SET hv.DiemTichLuy   = hv.DiemTichLuy + m.Diem,
+        hv.TongChiTieuNam = hv.TongChiTieuNam + m.ChiTieu
+    FROM dbo.HOI_VIEN hv
+    JOIN @HV m ON m.MaHV = hv.MaHV;
+
+    -- (5) RBTV94: nâng hạng theo ngưỡng chi tiêu cao nhất đạt được (chỉ nâng, không hạ)
+    UPDATE hv
+    SET hv.MaHang = nh.MaHang
+    FROM dbo.HOI_VIEN hv
+    JOIN @HV m ON m.MaHV = hv.MaHV
+    JOIN dbo.HANG_HOI_VIEN cur ON cur.MaHang = hv.MaHang
+    CROSS APPLY (SELECT TOP (1) h.MaHang, h.ChiTieuToiThieu
+                 FROM dbo.HANG_HOI_VIEN h
+                 WHERE h.ChiTieuToiThieu <= hv.TongChiTieuNam
+                 ORDER BY h.ChiTieuToiThieu DESC) nh
+    WHERE nh.ChiTieuToiThieu > cur.ChiTieuToiThieu;
+
+    -- (6) RBTV95: ghi nhận/cập nhật LICH_SU_HANG của năm hiện tại (mỗi hội viên một
+    --     dòng mỗi năm theo RBTV04): cập nhật dòng có sẵn, thiếu thì thêm mới.
+    DECLARE @Nam INT = YEAR(SYSDATETIME());
+
+    UPDATE ls
+    SET ls.TongChiTieu = hv.TongChiTieuNam,
+        ls.MaHang      = hv.MaHang,
+        ls.NgayCapNhat = SYSDATETIME()
+    FROM dbo.LICH_SU_HANG ls
+    JOIN dbo.HOI_VIEN hv ON hv.MaHV = ls.MaHV
+    JOIN @HV m ON m.MaHV = hv.MaHV
+    WHERE ls.NamXetHang = @Nam;
+
+    INSERT INTO dbo.LICH_SU_HANG (NamXetHang, TongChiTieu, MaHV, MaHang)
+    SELECT @Nam, hv.TongChiTieuNam, hv.MaHV, hv.MaHang
+    FROM dbo.HOI_VIEN hv
+    JOIN @HV m ON m.MaHV = hv.MaHV
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.LICH_SU_HANG ls
+                      WHERE ls.MaHV = hv.MaHV AND ls.NamXetHang = @Nam);
+END;
 GO
 
 
@@ -162,8 +289,7 @@ BEGIN
             THROW 50015, N'RBTV60: Hóa đơn có mua gói dịch vụ bắt buộc phải gắn hội viên.', 1;
         END;
 
-        -- RBTV61: cần ThoiHanThang để tính NgayKetThuc (cột NOT NULL)
-        -- TODO: chốt với nhóm quy tắc cho gói PT/Spa không có ThoiHanThang
+        -- RBTV61: gói phải có ThoiHanThang để tính NgayKetThuc; chưa có thì báo lỗi
         IF EXISTS (SELECT 1
                    FROM @Cart c
                    JOIN dbo.GOI_DICH_VU g ON g.MaGoi = c.MaGoi
@@ -441,9 +567,8 @@ GO
 -- ============================================================================
 -- PHẦN 4: LỆNH EXEC TEST & ĐO HIỆU NĂNG (SET STATISTICS TIME, IO ON)
 -- ============================================================================
--- Test lát (a), toàn bộ nằm trong một giao dịch và ROLLBACK ở cuối.
--- Khi chưa có Trigger (lát b): hóa đơn sau thanh toán vẫn 'Chờ thanh toán',
--- chưa cộng điểm, DANG_KY_GOI vẫn 'Tạm dừng'.
+-- Test lát (a) và (b), toàn bộ nằm trong một giao dịch và ROLLBACK ở cuối,
+-- không để lại dữ liệu.
 
 /*
 SET STATISTICS TIME ON;
@@ -481,9 +606,44 @@ SELECT * FROM HOA_DON WHERE MaHD = @hd;
 SELECT * FROM CHI_TIET_HOA_DON WHERE MaHD = @hd;
 SELECT * FROM DANG_KY_GOI WHERE MaHD = @hd;     -- 1 dòng, 'Tạm dừng', kết thúc sau 3 tháng
 
-EXEC dbo.sp_ThanhToanHoaDon @MaHD = @hd, @HinhThucTT = N'Tiền mặt', @MaTT = @tt OUTPUT;
+-- Lát (b): thanh toán hai lần. Lần 1 chưa đủ tiền nên hóa đơn vẫn chờ.
+EXEC dbo.sp_ThanhToanHoaDon @MaHD = @hd, @HinhThucTT = N'Tiền mặt', @SoTien = 500000, @MaTT = @tt OUTPUT;
+SELECT TrangThai FROM HOA_DON WHERE MaHD = @hd;               -- 'Chờ thanh toán'
 
-ROLLBACK TRANSACTION;
+-- Lần 2 trả phần còn lại (1.030.000) nên Trigger chốt hóa đơn.
+-- Kỳ vọng: 'Đã thanh toán', DiemCong = 15, DiemTichLuy = 15,
+--          TongChiTieuNam = 1.530.000, hạng Silver
+EXEC dbo.sp_ThanhToanHoaDon @MaHD = @hd, @HinhThucTT = N'Tiền mặt', @MaTT = @tt OUTPUT;
+SELECT * FROM DANG_KY_GOI WHERE MaHD = @hd;                   -- 'Đang hiệu lực', bắt đầu hôm nay
+SELECT * FROM LICH_SU_DIEM WHERE MaHV = @hv;                  -- 1 dòng 'Cộng' = 15
+SELECT * FROM LICH_SU_HANG WHERE MaHV = @hv;                  -- 1 dòng, năm hiện tại, Silver
+
+-- Nâng hạng: hóa đơn 14.000.000 đưa tổng chi tiêu lên 15.530.000 (>= ngưỡng Gold 15.000.000)
+INSERT INTO GOI_DICH_VU (MaGoi, TenGoi, LoaiGoi, ThoiHanThang, GiaTien)
+VALUES ('G_BIG', N'Gym 12 tháng', N'Gym', 12, 14000000);
+
+DECLARE @hd2 BIGINT;
+EXEC dbo.sp_TaoHoaDon
+     @MaCN = 'CN_TEST', @MaNV = @nv, @MaHV = @hv,
+     @GioHang = N'[{"MaGoi":"G_BIG","SoLuong":1}]',
+     @MaHD = @hd2 OUTPUT;
+EXEC dbo.sp_ThanhToanHoaDon @MaHD = @hd2, @HinhThucTT = N'Tiền mặt', @MaTT = @tt OUTPUT;
+
+-- Kỳ vọng: DiemTichLuy = 15 + 140 = 155, hạng Gold; LICH_SU_HANG vẫn 1 dòng (đã cập nhật)
+SELECT DiemTichLuy, TongChiTieuNam, MaHang FROM HOI_VIEN WHERE MaHV = @hv;
+SELECT * FROM LICH_SU_HANG WHERE MaHV = @hv;
+
+-- Đổi điểm: đổi 50 thì còn 105; đổi 500 phải bị từ chối (RBTV91).
+-- Lưu ý: lỗi trong thủ tục sẽ ROLLBACK toàn bộ giao dịch test, nên để lệnh này ở cuối.
+EXEC dbo.sp_DoiDiemThuong @MaHV = @hv, @SoDiemDoi = 50;
+BEGIN TRY
+    EXEC dbo.sp_DoiDiemThuong @MaHV = @hv, @SoDiemDoi = 500;
+END TRY
+BEGIN CATCH
+    SELECT ERROR_NUMBER() AS Loi, ERROR_MESSAGE() AS ThongBao;   -- 50041
+END CATCH;
+
+IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
 
 SET STATISTICS TIME OFF;
 SET STATISTICS IO OFF;
